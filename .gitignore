@@ -1,0 +1,17 @@
+# binary
+sandra_pdf
+
+# Go
+/vendor/
+*.test
+*.out
+dist/
+
+# local
+*.pfx
+*.p12
+*.crt
+*.key
+*.pem
+*~
+.DS_Store
