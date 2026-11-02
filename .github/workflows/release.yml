@@ -165,12 +165,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: true
-
       - name: Descargar binarios Linux
         uses: actions/download-artifact@v4
         with:
@@ -179,9 +173,16 @@ jobs:
           merge-multiple: false
 
       - name: Instalar nfpm
+        env:
+          NFPM_VERSION: "v2.48.0"
         run: |
-          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
-          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          set -euo pipefail
+          curl -sSfL \
+            "https://github.com/goreleaser/nfpm/releases/download/${NFPM_VERSION}/nfpm_2.48.0_Linux_x86_64.tar.gz" \
+            -o /tmp/nfpm.tar.gz
+          tar -xzf /tmp/nfpm.tar.gz -C /tmp nfpm
+          sudo install -m 0755 /tmp/nfpm /usr/local/bin/nfpm
+          nfpm --version
 
       - name: Generar paquetes
         env:
