@@ -266,9 +266,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release
-          cp artifacts/* release/
+          cp -a artifacts/. release/
           cd release
-          sha256sum * > checksums.txt
+          sha256sum -- * > checksums.txt
           cat checksums.txt
 
       - name: Release
