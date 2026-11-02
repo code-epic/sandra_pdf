@@ -1,0 +1,327 @@
+name: Release — sandra_pdf
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Versión a construir (ej: 0.2.0). Vacío = tag actual o 0.0.0-dev"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GO_VERSION: "1.25.x"
+  BINARY_NAME: sandra_pdf
+  PKG_MAINTAINER: "CodeEpic <dev@code-epic.io>"
+
+jobs:
+  # ------------------------------------------------------------------
+  # Versión: tag vX.Y.Z, input manual o 0.0.0-dev
+  # ------------------------------------------------------------------
+  version:
+    name: Resolver versión
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - name: Resolver
+        id: resolve
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+            TAG="${GITHUB_REF#refs/tags/}"
+          elif [[ -n "${{ github.event.inputs.version }}" ]]; then
+            VERSION="${{ github.event.inputs.version }}"
+            TAG="v${VERSION}"
+          else
+            VERSION="0.0.0-dev"
+            TAG=""
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Versión: ${VERSION} (tag: ${TAG:-ninguno})"
+
+  # ------------------------------------------------------------------
+  # Verificación: vet + tests
+  # ------------------------------------------------------------------
+  verify:
+    name: Verificar (vet + tests)
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./... -count=1
+
+  # ------------------------------------------------------------------
+  # Build: binarios estáticos (CGO off) para Linux, macOS y Windows
+  # ------------------------------------------------------------------
+  build:
+    name: Build ${{ matrix.suffix }}
+    needs: [version, verify]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            suffix: linux-amd64
+          - goos: linux
+            goarch: arm64
+            suffix: linux-arm64
+          - goos: darwin
+            goarch: amd64
+            suffix: darwin-amd64
+          - goos: darwin
+            goarch: arm64
+            suffix: darwin-arm64
+          - goos: windows
+            goarch: amd64
+            suffix: windows-amd64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Compilar
+        shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          EXT=""
+          [[ "${GOOS}" == "windows" ]] && EXT=".exe"
+          go build -trimpath \
+            -ldflags "-s -w \
+              -X github.com/code-epic/sandra_pdf/cmd.appVersion=${VERSION} \
+              -X github.com/code-epic/sandra_pdf/cmd.commit=${GITHUB_SHA::8} \
+              -X github.com/code-epic/sandra_pdf/cmd.buildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -o "dist/${BINARY_NAME}${EXT}" .
+          echo "=== ${GOOS}/${GOARCH} ==="
+          file "dist/${BINARY_NAME}${EXT}"
+
+      - name: Empaquetar
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          NAME="${BINARY_NAME}-${{ needs.version.outputs.version }}-${{ matrix.suffix }}"
+          if [[ "${{ matrix.goos }}" == "windows" ]]; then
+            zip -q "${NAME}.zip" "${BINARY_NAME}.exe"
+          else
+            tar -czf "${NAME}.tar.gz" "${BINARY_NAME}"
+          fi
+          ls -lh
+
+      - name: Subir artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandra_pdf-${{ matrix.suffix }}
+          path: dist/*
+          retention-days: 30
+
+  # ------------------------------------------------------------------
+  # Paquetes DEB (Debian/Ubuntu) y RPM (RHEL/CentOS/Fedora/Rocky)
+  # ------------------------------------------------------------------
+  package:
+    name: Paquetes DEB + RPM
+    needs: [version, build]
+    if: needs.version.outputs.tag != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Descargar binarios Linux
+        uses: actions/download-artifact@v4
+        with:
+          pattern: sandra_pdf-linux-*
+          path: artifacts
+          merge-multiple: false
+
+      - name: Instalar nfpm
+        run: |
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Generar paquetes
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # rpm/deb no admiten '-' en la versión; '~' ordena como prerelease.
+          PKG_VERSION="${VERSION//-/\~}"
+          mkdir -p dist
+
+          for pair in "amd64:linux-amd64" "arm64:linux-arm64"; do
+            ARCH="${pair%%:*}"
+            SUFFIX="${pair##*:}"
+            case "${ARCH}" in
+              amd64) RPM_ARCH="x86_64" ;;
+              arm64) RPM_ARCH="aarch64" ;;
+            esac
+            BIN="artifacts/sandra_pdf-${SUFFIX}/sandra_pdf"
+            [[ -f "${BIN}" ]] || { echo "Falta ${BIN}"; exit 1; }
+            install -m 0755 "${BIN}" "dist/sandra_pdf-${ARCH}"
+
+            cat > "nfpm-${ARCH}.yaml" <<EOF
+          name: sandra_pdf
+          arch: ${ARCH}
+          platform: linux
+          version: ${PKG_VERSION}
+          release: "1"
+          section: utils
+          priority: optional
+          maintainer: ${PKG_MAINTAINER}
+          vendor: CodeEpic
+          homepage: https://github.com/code-epic/sandra_pdf
+          license: Proprietary
+          description: |
+            Caja de herramientas PDF del ecosistema Sandra.
+            Extrae y une paginas, optimiza, convierte a escala de grises,
+            gestiona metadata, audita seguridad y firma PDFs (X.509).
+          contents:
+            - src: dist/sandra_pdf-${ARCH}
+              dst: /usr/bin/sandra_pdf
+            - src: README.md
+              dst: /usr/share/doc/sandra_pdf/README.md
+          EOF
+
+            nfpm package -f "nfpm-${ARCH}.yaml" -p deb \
+              -t "dist/sandra_pdf_${VERSION}_${ARCH}.deb"
+            nfpm package -f "nfpm-${ARCH}.yaml" -p rpm \
+              -t "dist/sandra_pdf-${VERSION}-1.${RPM_ARCH}.rpm"
+          done
+
+          rm -f dist/sandra_pdf-amd64 dist/sandra_pdf-arm64
+          ls -lh dist
+
+      - name: Subir paquetes
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandra_pdf-packages
+          path: dist/*
+          retention-days: 30
+
+  # ------------------------------------------------------------------
+  # Release en GitHub con todos los artefactos + checksums
+  # ------------------------------------------------------------------
+  release:
+    name: Publicar release
+    needs: [version, verify, build, package]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Descargar artefactos
+        uses: actions/download-artifact@v4
+        with:
+          pattern: sandra_pdf-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          cp artifacts/* release/
+          cd release
+          sha256sum * > checksums.txt
+          cat checksums.txt
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "sandra_pdf v${{ needs.version.outputs.version }}"
+          body: |
+            ## sandra_pdf v${{ needs.version.outputs.version }}
+
+            CLI para procesar, auditar y manipular PDFs (ecosistema Sandra).
+
+            ### Binarios
+
+            | Plataforma | Arquitectura | Formato |
+            |------------|--------------|---------|
+            | Linux (Debian/Ubuntu) | amd64 / arm64 | `.deb` |
+            | Linux (RHEL/CentOS/Fedora) | x86_64 / aarch64 | `.rpm` |
+            | Linux | amd64 / arm64 | `.tar.gz` (estático) |
+            | macOS | amd64 / arm64 | `.tar.gz` |
+            | Windows | amd64 | `.zip` |
+
+            ### Instalación
+
+            **Debian / Ubuntu:**
+            ```bash
+            sudo dpkg -i sandra_pdf_${{ needs.version.outputs.version }}_amd64.deb
+            ```
+
+            **RHEL / CentOS / Fedora / Rocky:**
+            ```bash
+            sudo rpm -i sandra_pdf-${{ needs.version.outputs.version }}-1.x86_64.rpm
+            ```
+
+            **Tarball (cualquier Linux/macOS):**
+            ```bash
+            tar xzf sandra_pdf-${{ needs.version.outputs.version }}-linux-amd64.tar.gz
+            sudo install -m 0755 sandra_pdf /usr/local/bin/
+            ```
+
+            ### Verificación
+
+            ```bash
+            sha256sum -c checksums.txt
+            sandra_pdf --version
+            ```
+
+            ### Verificar firmas de PDFs
+
+            ```bash
+            pdfsig documento.pdf   # poppler-utils
+            ```
+          files: release/*
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

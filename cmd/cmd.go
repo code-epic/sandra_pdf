@@ -10,8 +10,14 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// appVersion versión del tool.
-const appVersion = "0.1.0"
+// appVersion, commit y buildDate se inyectan en build con:
+//
+//	-ldflags "-X github.com/code-epic/sandra_pdf/cmd.appVersion=v1.2.3 ..."
+var (
+	appVersion = "0.1.0"
+	commit     = "dev"
+	buildDate  = "unknown"
+)
 
 // opts agrupa todos los flags del CLI.
 type opts struct {
@@ -83,6 +89,9 @@ func Execute() {
 }
 
 func init() {
+	rootCmd.Version = fmt.Sprintf("%s (commit %s, %s)", appVersion, commit, buildDate)
+	rootCmd.SetVersionTemplate("sandra_pdf {{.Version}}\n")
+
 	f := rootCmd.Flags()
 
 	f.StringVarP(&o.input, "input", "i", "", "archivo(s) PDF de entrada (separados por coma para --merge)")

@@ -26,6 +26,33 @@ metadata → firma → audit/info sobre el documento final.
 go build -o sandra_pdf .
 ```
 
+La versión se inyecta en build con `-ldflags`:
+
+```bash
+go build -trimpath -ldflags "-s -w \
+  -X github.com/code-epic/sandra_pdf/cmd.appVersion=1.2.3 \
+  -X github.com/code-epic/sandra_pdf/cmd.commit=$(git rev-parse --short HEAD) \
+  -X github.com/code-epic/sandra_pdf/cmd.buildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" .
+./sandra_pdf --version
+```
+
+## Instalación
+
+Cada tag `v*` publica binarios y paquetes vía GitHub Actions
+(`.github/workflows/release.yml`):
+
+```bash
+# Debian / Ubuntu
+sudo dpkg -i sandra_pdf_0.1.0_amd64.deb
+
+# RHEL / CentOS / Fedora / Rocky
+sudo rpm -i sandra_pdf-0.1.0-1.x86_64.rpm
+
+# Tarball estático (cualquier Linux/macOS)
+tar xzf sandra_pdf-0.1.0-linux-amd64.tar.gz
+sudo install -m 0755 sandra_pdf /usr/local/bin/
+```
+
 ## Uso
 
 ```bash
